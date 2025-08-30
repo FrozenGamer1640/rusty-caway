@@ -33,7 +33,7 @@ autosens = 1
 channels = mono
 method = raw
 data_format = ascii
-ascii_max_range = 5
+ascii_max_range = 7
 
 [smoothing]
 integral = 77
@@ -68,7 +68,7 @@ noise_reduction = 0.77
         .expect("couldn't capture cava's stdout");
     let reader = BufReader::new(stdout);
 
-    const BAR_CHARS: &[char] = &['▂', '▃', '▄', '▅', '▆', '▇'];
+    const BAR_CHARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     for line_result in reader.lines() {
         let line = line_result?;
