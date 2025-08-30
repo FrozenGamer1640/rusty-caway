@@ -1,115 +1,86 @@
-#!/usr/bin/bash
+use std::{
+    io::{self, BufReader, prelude::*},
+    process::{self, Command, Stdio},
+};
 
-# Nuke all internal spawns when script dies
-trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM
+use clap::Parser;
+use tempfile::NamedTempFile;
 
-BARS=8;
-FRAMERATE=60;
-EQUILIZER=1;
+#[derive(Parser, Debug)]
+#[command(name = "rusty-caway", version, about, long_about = None)]
+struct Cli {
+    #[arg(short, long, default_value_t = 70)]
+    bars: u32,
 
-# Get script options
-while getopts 'b:f:m:eh' flag; do
-    case "${flag}" in
-        b) BARS="${OPTARG}" ;;
-        f) FRAMERATE="${OPTARG}" ;;
-        e) EQUILIZER=0 ;;
-        h)
-            echo "caway usage: caway [ options ... ]"
-            echo "where options include:"
-            echo
-            echo "  -b <integer>  (Number of bars to display. Default 8)"
-            echo "  -f <integer>  (Framerate of the equilizer. Default 60)"
-            echo "  -e            (Disable equilizer. Default enabled)"
-            echo "  -h            (Show help message)"
-            exit 0
-            ;;
-    esac
-done
-
-bar="▁▂▃▄▅▆▇█"
-dict="s/;//g;"
-
-# creating "dictionary" to replace char with bar + thin space " "
-i=0
-while [ $i -lt ${#bar} ]
-do
-    dict="${dict}s/$i/${bar:$i:1} /g;"
-    i=$((i=i+1))
-done
-
-# Remove last extra thin space
-dict="${dict}s/.$//;"
-
-clean_create_pipe() {
-    if [ -p $1 ]; then
-        unlink $1
-    fi
-    mkfifo $1
+    #[arg(short, long, default_value_t = 55)]
+    framerate: u32,
 }
 
-kill_pid_file() {
-    if [[ -f $1 ]]; then
-        while read pid; do
-            { kill "$pid" && wait "$pid"; } 2>/dev/null
-        done < $1
-    fi
-}
+fn main() -> io::Result<()> {
+    let cli = Cli::parse();
 
-# PID of the cava process and while loop launched from the script
-cava_waybar_pid="/tmp/cava_waybar_pid"
-
-# Clean pipe for cava
-cava_waybar_pipe="/tmp/cava_waybar.fifo"
-clean_create_pipe $cava_waybar_pipe
-
-# Custom cava config
-cava_waybar_config="/tmp/cava_waybar_config"
-echo "
-[general]
-mode = normal
-framerate = $FRAMERATE
-bars = $BARS
+    // Cava configuration
+    let cava_config_content = format!(
+        r#"[general]
+mode = waves
+framerate = {}
+bars = {}
+lower_cutoff_freq = 50
+higher_cutoff_freq = 15000
+autosens = 1
 
 [output]
+channels = mono
 method = raw
-raw_target = $cava_waybar_pipe
 data_format = ascii
-ascii_max_range = 7
-" > $cava_waybar_config
+ascii_max_range = 5
 
-# Clean pipe for playerctl
-playerctl_waybar_pipe="/tmp/playerctl_waybar.fifo"
-clean_create_pipe $playerctl_waybar_pipe
+[smoothing]
+integral = 77
+gravity = 100
+ignore = 0
+noise_reduction = 0.77
+"#,
+        cli.framerate, cli.bars
+    );
 
-# playerctl output into playerctl_waybar_pipe
-playerctl -a metadata --format '{"text": "{{artist}} - {{title}}", "tooltip": "{{playerName}} : {{markup_escape(artist)}} - {{markup_escape(title)}}", "alt": "{{status}}", "class": "{{status}}"}' -F >$playerctl_waybar_pipe &
+    let mut config_file = NamedTempFile::new()?;
+    config_file.write_all(cava_config_content.as_bytes())?;
+    let config_path = config_file.path();
 
-# Read the playerctl o/p via its fifo pipe
-while read -r line; do
-    # Kill the cava process to stop the input to cava_waybar_pipe
-    kill_pid_file $cava_waybar_pid
+    let mut cava_process = match Command::new("cava")
+        .arg("-p")
+        .arg(config_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(process) => process,
+        Err(e) => {
+            eprintln!("error executing cava. ¿is cava in your PATH? Error: {}", e);
+            process::exit(1);
+        }
+    };
 
-    echo "$line" | jq --unbuffered --compact-output
+    let stdout = cava_process
+        .stdout
+        .take()
+        .expect("couldn't capture cava's stdout");
+    let reader = BufReader::new(stdout);
 
-    # If the class says "Playing" and equilizer is enabled
-    # then show the cava equilizer
-    if [[ $EQUILIZER == 1 && $(echo $line | jq -r '.class') == 'Playing' ]]; then
-        # Show the playing title for 2 seconds
-        sleep 2
+    const BAR_CHARS: &[char] = &['▂', '▃', '▄', '▅', '▆', '▇'];
 
-        # cava output into cava_waybar_pipe
-        cava -p $cava_waybar_config >$cava_waybar_pipe &
+    for line_result in reader.lines() {
+        let line = line_result?;
 
-        # Save the PID of child process
-        echo $! > $cava_waybar_pid
+        let processed_line: String = line
+            .split(';')
+            .filter_map(|s| s.parse::<usize>().ok())
+            .filter_map(|i| BAR_CHARS.get(i))
+            .collect();
 
-        # Read the cava o/p via its fifo pipe
-        while read -r cmd2; do
-            # Change the "text" key to bars
-            echo "$line" | jq --arg a $(echo $cmd2 | sed "$dict") '.text = $a' --unbuffered --compact-output
-        done < $cava_waybar_pipe & # Do this fifo read in background
+        println!("{}", processed_line);
+    }
 
-        # Save the while loop PID into the file as well
-        echo $! >> $cava_waybar_pid
-    fi
-done < $playerctl_waybar_pipe
+    Ok(())
+}
